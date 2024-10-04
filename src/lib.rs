@@ -458,10 +458,12 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
             // let invoke_svc = format_ident!("invoke_{}", field);
             let new_code = quote! {
                 impl #tn #lifetimes_code {
+                    #[allow(non_snake_case)]
                     pub fn #get_ts_ref(&self) -> &Option<ServiceReference<#itn>> {
                         &self.#injected_ref
                     }
 
+                    #[allow(non_snake_case)]
                     pub fn #set_ts_ref(&mut self,
                             sreg: &::dynamic_services::ServiceRegistration,
                             props: &std::collections::BTreeMap<String, String>) {
