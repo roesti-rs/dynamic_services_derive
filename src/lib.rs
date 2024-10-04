@@ -586,6 +586,7 @@ fn generate_consumer(path: PathBuf, file_name: &str) -> Option<(String, String, 
                         (#ps, Vec<::dynamic_services::ServiceRegistration>, ::dynamic_services::InjectMetadata)>>>
                 = ::once_cell::sync::Lazy::new(||std::sync::RwLock::new(std::collections::HashMap::new()));
 
+            #[allow(non_snake_case)]
             fn #register_fn() {
                 println!("Registering Consumer: {}", #type_name);
                 #global_ctor_map.write().unwrap().push(|| #ps::default());
@@ -659,6 +660,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
         let uninject_fn = format_ident!("uninject_{}", type_name);
         let global_ctor_map = format_ident!("CONSUMER_CTOR_{}", type_name.to_uppercase());
         let q = quote! {
+            #[allow(non_snake_case)]
             fn #inject_fn(svc: &Box<dyn ::std::any::Any + Send + Sync>,
                 sreg: &::dynamic_services::ServiceRegistration,
                 props: &std::collections::BTreeMap<String, String>) {
@@ -692,6 +694,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
                 }
             }
 
+            #[allow(non_snake_case)]
             fn #update_fn(sreg: &::dynamic_services::ServiceRegistration,
                 props: &std::collections::BTreeMap<String, String>) {
                 let global = #global_inst_map.read().unwrap();
@@ -702,6 +705,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
                 });
             }
 
+            #[allow(non_snake_case)]
             fn #uninject_fn(sreg: &::dynamic_services::ServiceRegistration) {
                 let mut deleted = vec![];
                 let mut global = #global_inst_map.write().unwrap();
