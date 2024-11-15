@@ -439,6 +439,57 @@ fn get_lifetimes_from_json(actions: &[serde_json::Value]) -> Vec<String> {
     lifetimes
 }
 
+fn generate_update_method(type_name: &str, injected_type_name: &str,
+    field: &str, lifetimes: &Vec<String>) -> proc_macro2::TokenStream {
+
+    let mut upd_func_names = vec![];
+    let upd_file = format!("{}/target/_{}.updtmp", std::env::var("CARGO_MANIFEST_DIR").unwrap(), type_name);
+    if Path::new(&upd_file).exists() {
+        let upd_content = fs::read_to_string(upd_file).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&upd_content).unwrap();
+        for action in json.as_array().unwrap() {
+            let op = action["op"].as_str().unwrap();
+            match op {
+                "UpdateFunct" => {
+                    let func_name = action["method"].as_str().unwrap();
+                    upd_func_names.push(func_name.to_string());
+                }
+                _ => {
+                    panic!("Unknown action: {}", op);
+                }
+            }
+            // alternative
+            // if op == "UpdateFunct" {
+            //     upd_func_name.push(action["method"].as_str().unwrap().to_string());
+            // }
+        }
+    }
+
+    let mut update_calls = vec![];
+    for name in upd_func_names {
+        let func_name = format_ident!("{}", name);
+        update_calls.push(quote!{
+            self.#func_name(#field, props.clone());
+        });
+    }
+
+    let update_type = format_ident!("update_{}", injected_type_name);
+    let new_code = quote!{
+        pub fn #update_type(&self,
+            props: &std::collections::BTreeMap<String, String>) {
+                println!("********* updating {} with {:?}", #field, props);
+                #(#update_calls)*
+            }
+                    // pub fn #update_ts(&self,
+                    //         props: &std::collections::BTreeMap<String, String>) {
+                    //     println!("********* updating {} with {:?}", #field, props);
+                    //     self.update(#field, props.clone());
+                    // }    };
+    };
+
+    new_code
+}
+
 fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec<String>,
         lifetimes: &Vec<String>) -> proc_macro2::TokenStream {
     let lifetimes_code = quote_fixed_lifetimes(lifetimes.len(), quote! { '_ });
@@ -452,15 +503,24 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
 
             let tn = format_ident!("{}", type_name);
             let get_ts_ref = format_ident!("get_{}_ref", injected_type_name);
+            let get_ts_field = format_ident!("get_{}_fieldname", injected_type_name);
             let set_ts_ref = format_ident!("set_{}_ref", injected_type_name);
             let itn = format_ident!("{}", injected_type_name);
             let injected_ref = format_ident!("{}", field);
             // let invoke_svc = format_ident!("invoke_{}", field);
-            let new_code = quote! {
+
+            let update_md = generate_update_method(type_name, injected_type_name, field, lifetimes);
+
+            let mut new_code = quote! {
                 impl #tn #lifetimes_code {
                     #[allow(non_snake_case)]
                     pub fn #get_ts_ref(&self) -> &Option<ServiceReference<#itn>> {
                         &self.#injected_ref
+                    }
+
+                    #[allow(non_snake_case)]
+                    pub fn #get_ts_field() -> &'static str {
+                        #field
                     }
 
                     #[allow(non_snake_case)]
@@ -470,8 +530,18 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
                         println!("[{}] Setting {} to {:?}", #type_name, #field, sreg);
                         self.#injected_ref = Some(ServiceReference::from(sreg, props.clone()));
                     }
+
+                    #update_md
+
+                    // pub fn #update_ts(&self,
+                    //         props: &std::collections::BTreeMap<String, String>) {
+                    //     println!("********* updating {} with {:?}", #field, props);
+                    //     self.update(#field, props.clone());
+                    // }
                 }
             };
+
+
             return new_code;
         },
         "LifeTimes" => {
@@ -505,12 +575,16 @@ pub fn dynamic_services_main(_attr: TokenStream, item: TokenStream) -> TokenStre
         fn update_service(sreg: &::dynamic_services::ServiceRegistration,
                 mut props: std::collections::BTreeMap<String, String>) {
             props.insert(".service_id".to_string(), sreg.id.to_string());
-            let mut regd = ::dynamic_services::REGD_SERVICES.write().unwrap();
-            if let Some((_, p)) = regd.get_mut(sreg) {
-                *p = props.clone();
 
-                update_consumers(sreg, props);
+            {
+                // In a separate scope to not keep the write lock scope short
+                let mut regd = ::dynamic_services::REGD_SERVICES.write().unwrap();
+                if let Some((_, p)) = regd.get_mut(sreg) {
+                    *p = props.clone();
+
+                }
             }
+            update_consumers(sreg, props);
         }
 
         fn unregister_service(sr: ::dynamic_services::ServiceRegistration) {
@@ -639,7 +713,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
 
         let expected_num_injects = setter_injects.len();
         let mut inject_calls = vec![];
-        for (_, injected_type_name) in setter_injects {
+        for (_, injected_type_name) in &setter_injects {
             let itn = format_ident!("{}", injected_type_name);
             let getter_ref = format_ident!("get_{}_ref", injected_type_name);
             let setter_ref = format_ident!("set_{}_ref", injected_type_name);
@@ -656,6 +730,20 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
             });
         }
 
+        let mut update_calls = vec![];
+        for (_, injected_type_name) in &setter_injects {
+            let itn = format_ident!("{}", injected_type_name);
+            let updater = format_ident!("update_{}", injected_type_name);
+            update_calls.push(quote!{
+                if let Some(dcsvc) = svcx.downcast_ref::<#itn>() {
+                    println!("Found my service {:?}", dcsvc);
+                    for (_, (i, _, _)) in gm.iter() {
+                        // call update_TidalService(field, propsx);
+                        i.#updater(propsx);
+                    }
+                }
+            });
+        }
 
         let inject_fn = format_ident!("inject_{}", type_name);
         let update_fn = format_ident!("update_{}", type_name);
@@ -699,12 +787,28 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
             #[allow(non_snake_case)]
             fn #update_fn(sreg: &::dynamic_services::ServiceRegistration,
                 props: &std::collections::BTreeMap<String, String>) {
+
+                let regd = ::dynamic_services::REGD_SERVICES.read().unwrap();
+                let svc = regd.get(&sreg);
+                if let Some((svcx, propsx)) = svc {
+                    let mut gm = #global_inst_map.read().unwrap();
+                    println!("XUpdating service: {:?} - {:?}", svcx, propsx);
+
+                    #(#update_calls)*
+                    // println!("Found type: {:?}", t);
+                    // println!("  and props: {:?}", p);
+                }
+                // setter injects has the mapping from type name to field name
+                // println!("Injected type name: {}", setter_injects); /* */
+
+                /*
                 let global = #global_inst_map.read().unwrap();
                 global.iter()
                     .filter(|(_, (_, regs, _))| regs.contains(sreg))
                     .for_each(|(_, (c, _, _))| {
                         #update_call;
                 });
+                 */
             }
 
             #[allow(non_snake_case)]
@@ -820,8 +924,8 @@ fn generate_update(file: &str, new_code: &mut proc_macro2::TokenStream) {
                 let func_name = action["method"].as_str().unwrap();
                 let update_md = format_ident!("{}", func_name);
                 new_code.extend(quote! {
-                    // c.#update_md(props.clone());
-                    c.#update_md();
+                    c.#update_md(props.clone());
+                    // c.#update_md();
                 });
             }
             _ => {
