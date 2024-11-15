@@ -44,18 +44,20 @@ impl Action {
     }
 }
 
+// Implement the #derive(DynamicServices) macro
 #[proc_macro_derive(DynamicServices, attributes(inject, constructor))]
 pub fn dynamic_services_derive(input: TokenStream) -> TokenStream {
     // Construct a representation of Rust code as a syntax tree
     // that we can manipulate
     let ast = syn::parse(input).unwrap();
 
-    // Build the trait implementation
-    impl_dynamic_services(ast)
+    // Find the injection points and write to file
+    find_injection_points(ast)
 }
 
-fn impl_dynamic_services(ast: syn::DeriveInput) -> TokenStream {
-    let (tn, actions) = match find_injected_fields(ast.clone()) {
+// Find the injection points and write these to a file at target/_<type_name>.tmp
+fn find_injection_points(ast: syn::DeriveInput) -> TokenStream {
+    let (tn, actions) = match find_injection_info(ast) {
         Ok(t) => t,
         Err(err) => return TokenStream::from(err.to_compile_error())
     };
@@ -78,6 +80,7 @@ fn impl_dynamic_services(ast: syn::DeriveInput) -> TokenStream {
     quote!{}.into()
 }
 
+// Write a file target/_<type_name>.tmp with the injection actions
 fn write_actions_file(tn: String, lines: Vec<String>) {
     if lines.len() == 0 {
         return;
@@ -90,7 +93,8 @@ fn write_actions_file(tn: String, lines: Vec<String>) {
     std::fs::write(filenm, content).expect("Unable to write file");
 }
 
-fn find_injected_fields(ast: DeriveInput)
+// Search the AST for the injection info, which is injected fields and lifetime information
+fn find_injection_info(ast: DeriveInput)
   -> Result<(String, Vec<Action>)> {
     let fields = match ast.data {
         | Data::Enum(DataEnum { enum_token: token::Enum { span }, ..})
@@ -109,6 +113,8 @@ fn find_injected_fields(ast: DeriveInput)
     };
 
     let mut actions = Vec::new();
+
+    // Find the fields with the #[inject] macro
     for f in fields.named.iter() {
         if !find_attribute(f, "inject") {
             continue;
@@ -127,6 +133,7 @@ fn find_injected_fields(ast: DeriveInput)
     Ok((ast.ident.to_string(), actions))
 }
 
+// Get the declared lifetimes of the struct as they are needed when generating additions to it
 fn get_lifetimes(params: &syn::punctuated::Punctuated<syn::GenericParam, token::Comma>) -> Action {
     let mut lifetimes = vec![];
 
@@ -156,6 +163,9 @@ fn find_attribute(f: &syn::Field, _name: &str) -> bool {
     false
 }
 
+//////////////////////////////////////////////////////////////////////////////////
+// Methods below here are used to find the fields that need to be injected in the syntax tree
+//////////////////////////////////////////////////////////////////////////////////
 fn get_type_name(ident: &syn::Ident, ref_type: &syn::TypePath) -> Option<Action> {
     for s in ref_type.path.segments.iter() {
         if s.ident.to_string() != "Option" {
@@ -220,6 +230,9 @@ fn get_serviceref_typearg(ident: &syn::Ident, aba: &syn::AngleBracketedGenericAr
     }
     None
 }
+//////////////////////////////////////////////////////////////////////////////////
+// Methods above here are used to find the fields that need to be injected in the syntax tree
+//////////////////////////////////////////////////////////////////////////////////
 
 #[proc_macro_attribute]
 pub fn activator(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -239,21 +252,24 @@ pub fn update(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-// For impl classes
+// This macro is used on struct implementations to generate the code for the dynamic services.
+// It can only be used on structs that have the #[derive(DynamicServices)] macro.
 #[proc_macro_attribute]
 pub fn dynamic_services(attrs: TokenStream, item: TokenStream) -> TokenStream {
     let toks: Result<syn::ItemImpl> = syn::parse(item.clone().into());
     let tokens = toks.unwrap();
 
+    // Read the type name from the implementation
     let impl_type_box = &tokens.self_ty;
     let impl_type = if let Type::Path(tp) = impl_type_box.as_ref() {
         tp.path.segments.first().unwrap()
     } else {
         panic!("Not a path");
     };
-
     let type_name = impl_type.ident.to_string();
 
+    // Find the various macros in the implementation code, #[activator], #[deactivator],
+    // #[update] that denote the callback methods to use.
     if let Some(activator) = find_activator(&tokens) {
         write_action(activator, &type_name, "acttmp");
     }
@@ -271,8 +287,8 @@ pub fn dynamic_services(attrs: TokenStream, item: TokenStream) -> TokenStream {
 
     let file = format!("{}/target/_{}.tmp", std::env::var("CARGO_MANIFEST_DIR").unwrap(), type_name);
     if Path::new(&file).exists() {
-        generate_class(&file, &type_name, &mut generated);
-    }
+        generate_impl(&file, &type_name, &mut generated);
+    } // TODO fail if not found
 
     generated.into()
 }
@@ -305,6 +321,7 @@ fn get_full_path(path: &syn::ExprPath) -> Option<Action> {
     None
 }
 
+// Write file in target/_<curtype>.<suffix> with the action serialized as JSON
 fn write_action(action: Action, curtype: &str, suffix: &str) {
     let filenm = format!("{}/target/_{}.{}", std::env::var("CARGO_MANIFEST_DIR").unwrap(), curtype, suffix);
     let content = format!("[{}]", action.to_string());
@@ -352,6 +369,7 @@ fn find_update(itimpl: &syn::ItemImpl) -> Option<Action> {
     return None;
 }
 
+// Get the parameter signatures from a callback function signature
 fn get_inputs_from_fn(inputs: &syn::punctuated::Punctuated<syn::FnArg, token::Comma>) -> Vec<String> {
     let mut counter = 0;
     let mut args = vec![];
@@ -384,14 +402,15 @@ fn get_inputs_from_fn(inputs: &syn::punctuated::Punctuated<syn::FnArg, token::Co
     args
 }
 
-
-fn generate_class(file_path: &str, type_name: &str, generated: &mut proc_macro2::TokenStream) {
+// Generate the extension to the struct impl
+fn generate_impl(file_path: &str, type_name: &str, generated: &mut proc_macro2::TokenStream) {
     let content = fs::read_to_string(file_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
     let lifetimes = get_lifetimes_from_json(json.as_array().unwrap());
     let mut fields = vec![];
     for action in json.as_array().unwrap() {
+        // Iterate over all injection points
         generated.extend(generate_action(type_name, action, &mut fields, &lifetimes));
     }
 
@@ -442,6 +461,7 @@ fn get_lifetimes_from_json(actions: &[serde_json::Value]) -> Vec<String> {
 fn generate_update_method(type_name: &str, injected_type_name: &str,
     field: &str) -> proc_macro2::TokenStream {
 
+    // Read the target/_<type_name>.updtmp file to get the update method name
     let mut upd_func_names = vec![];
     let upd_file = format!("{}/target/_{}.updtmp", std::env::var("CARGO_MANIFEST_DIR").unwrap(), type_name);
     if Path::new(&upd_file).exists() {
@@ -465,6 +485,8 @@ fn generate_update_method(type_name: &str, injected_type_name: &str,
         }
     }
 
+    // For each update method name found generate code to call the update method.
+    // If there are no update methods then this will generate no code.
     let mut update_calls = vec![];
     for name in upd_func_names {
         let func_name = format_ident!("{}", name);
@@ -473,6 +495,7 @@ fn generate_update_method(type_name: &str, injected_type_name: &str,
         });
     }
 
+    // Generate the update_<injected_type_name> method
     let update_type = format_ident!("update_{}", injected_type_name);
     let set_type_ref = format_ident!("set_{}_ref", injected_type_name);
     let new_code = quote!{
@@ -489,6 +512,7 @@ fn generate_update_method(type_name: &str, injected_type_name: &str,
     new_code
 }
 
+// Generate the consumer impl code for actions found in the target/_<type_name>.tmp file
 fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec<String>,
         lifetimes: &Vec<String>) -> proc_macro2::TokenStream {
     let lifetimes_code = quote_fixed_lifetimes(lifetimes.len(), quote! { '_ });
@@ -496,6 +520,7 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
     let op = action["op"].as_str().unwrap();
     match op {
         "SetterInjectField" => {
+            // Generate setters/getters/updaters
             let field = action["field"].as_str().unwrap();
             fields.push(field.to_string());
             let injected_type_name = action["type"].as_str().unwrap();
@@ -511,16 +536,19 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
 
             let new_code = quote! {
                 impl #tn #lifetimes_code {
+                    // Generate the getter for the injected field
                     #[allow(non_snake_case)]
                     pub fn #get_ts_ref(&self) -> &Option<ServiceReference<#itn>> {
                         &self.#injected_ref
                     }
 
+                    // Returns the name of the injected field as string
                     #[allow(non_snake_case)]
                     pub fn #get_ts_field() -> &'static str {
                         #field
                     }
 
+                    // Generate the setter for the injected field
                     #[allow(non_snake_case)]
                     pub fn #set_ts_ref(&mut self,
                             sreg: &::dynamic_services::ServiceRegistration,
@@ -535,7 +563,8 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
             return new_code;
         },
         "LifeTimes" => {
-            return quote!{};
+            // read earlier
+            return quote!{}; // returns no code
         },
         _ => {
             panic!("Unknown action: {}", op);
@@ -543,7 +572,7 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
     }
 }
 
-// For the main class
+// This macro is for the main implementation. It expands its code with additional functions.
 #[proc_macro_attribute]
 pub fn dynamic_services_main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut generated: proc_macro2::TokenStream = item.into();
@@ -598,6 +627,7 @@ pub fn dynamic_services_main(_attr: TokenStream, item: TokenStream) -> TokenStre
         }
     }
 
+    // Generate stable methods with a fixed name that call out to all relevant consumers
     generated.extend(generate_register_consumers(&consumer_types));
     generated.extend(generate_inject_consumers(&consumer_types));
     generated.extend(generate_update_consumers(&consumer_types));
@@ -611,6 +641,11 @@ fn quote_fixed_lifetimes(num: usize, lt: proc_macro2::TokenStream ) -> proc_macr
     quote! { <#(#lifetimes),*> }
 }
 
+/* Generates a 2 (lazy) statics
+ * CONSUMER_CTOR_<TYPE> which contains the constructor function that can be called to create the consumer
+ * CONSUMER_INST_<TYPE> which is a map with as key ConsumerRegistration and value a tuple of
+ *   (the_consumer_instance, a vector of service regstrations used, metadata)
+ */
 fn generate_consumer(path: PathBuf, file_name: &str) -> Option<(String, String, proc_macro2::TokenStream)> {
     if file_name.starts_with("_") && file_name.ends_with(".tmp") {
         let content = fs::read_to_string(&path).unwrap();
@@ -693,6 +728,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
         }
     }
 
+    // Get the activator invocation, made when all the the injections are done
     let act_call = generate_activator_call(type_name);
     let deact_call = generate_deactivator_call(type_name);
 
@@ -771,6 +807,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
                 }
             }
 
+            // Called when the service registration properties are updated
             #[allow(non_snake_case)]
             fn #update_fn(sreg: &::dynamic_services::ServiceRegistration,
                 props: &std::collections::BTreeMap<String, String>) {
@@ -815,6 +852,8 @@ fn generate_activator_call(type_name: &str) -> proc_macro2::TokenStream {
     new_code
 }
 
+// Generate the activator call, based on the fact that there are potentially multiple arguments which are references to the service instances
+// that the consumer depends on. These can be in any order and can be a subset of all the injected services.
 fn generate_activator(file: &str, new_code: &mut proc_macro2::TokenStream) {
     let acttmp_content = fs::read_to_string(file).unwrap();
     let json: serde_json::Value = serde_json::from_str(&acttmp_content).unwrap();
@@ -886,7 +925,6 @@ fn generate_deactivator_call(type_name: &str) -> proc_macro2::TokenStream {
     new_code
 }
 
-// TODO collapse with activator
 fn generate_deactivator(file: &str, new_code: &mut proc_macro2::TokenStream) {
     let deacttmp_content = fs::read_to_string(file).unwrap();
     let json: serde_json::Value = serde_json::from_str(&deacttmp_content).unwrap();
@@ -908,6 +946,7 @@ fn generate_deactivator(file: &str, new_code: &mut proc_macro2::TokenStream) {
     }
 }
 
+// Generates a register_consumers function that registers each consumer
 fn generate_register_consumers(consumer_types: &HashMap<String, String>) -> proc_macro2::TokenStream {
     let mut register_calls = vec![];
     for (ct, _) in consumer_types {
