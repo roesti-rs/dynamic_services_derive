@@ -474,17 +474,16 @@ fn generate_update_method(type_name: &str, injected_type_name: &str,
     }
 
     let update_type = format_ident!("update_{}", injected_type_name);
+    let set_type_ref = format_ident!("set_{}_ref", injected_type_name);
     let new_code = quote!{
-        pub fn #update_type(&self,
-            props: &std::collections::BTreeMap<String, String>) {
-                println!("********* updating {} with {:?}", #field, props);
-                #(#update_calls)*
-            }
-                    // pub fn #update_ts(&self,
-                    //         props: &std::collections::BTreeMap<String, String>) {
-                    //     println!("********* updating {} with {:?}", #field, props);
-                    //     self.update(#field, props.clone());
-                    // }    };
+        pub fn #update_type(&mut self,
+                sreg: &::dynamic_services::ServiceRegistration,
+                props: &std::collections::BTreeMap<String, String>) {
+            println!("********* updating {} with {:?}", #field, props);
+            self.#set_type_ref(&sreg, &props);
+
+            #(#update_calls)*
+        }
     };
 
     new_code
@@ -532,15 +531,8 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
                     }
 
                     #update_md
-
-                    // pub fn #update_ts(&self,
-                    //         props: &std::collections::BTreeMap<String, String>) {
-                    //     println!("********* updating {} with {:?}", #field, props);
-                    //     self.update(#field, props.clone());
-                    // }
                 }
             };
-
 
             return new_code;
         },
@@ -737,9 +729,8 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
             update_calls.push(quote!{
                 if let Some(dcsvc) = svcx.downcast_ref::<#itn>() {
                     println!("Found my service {:?}", dcsvc);
-                    for (_, (i, _, _)) in gm.iter() {
-                        // call update_TidalService(field, propsx);
-                        i.#updater(propsx);
+                    for (_, (i, _, _)) in gm.iter_mut() {
+                        i.#updater(sreg, propsx);
                     }
                 }
             });
@@ -791,7 +782,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
                 let regd = ::dynamic_services::REGD_SERVICES.read().unwrap();
                 let svc = regd.get(&sreg);
                 if let Some((svcx, propsx)) = svc {
-                    let mut gm = #global_inst_map.read().unwrap();
+                    let mut gm = #global_inst_map.write().unwrap();
                     println!("XUpdating service: {:?} - {:?}", svcx, propsx);
 
                     #(#update_calls)*
