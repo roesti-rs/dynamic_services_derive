@@ -440,7 +440,7 @@ fn get_lifetimes_from_json(actions: &[serde_json::Value]) -> Vec<String> {
 }
 
 fn generate_update_method(type_name: &str, injected_type_name: &str,
-    field: &str, lifetimes: &Vec<String>) -> proc_macro2::TokenStream {
+    field: &str) -> proc_macro2::TokenStream {
 
     let mut upd_func_names = vec![];
     let upd_file = format!("{}/target/_{}.updtmp", std::env::var("CARGO_MANIFEST_DIR").unwrap(), type_name);
@@ -476,10 +476,10 @@ fn generate_update_method(type_name: &str, injected_type_name: &str,
     let update_type = format_ident!("update_{}", injected_type_name);
     let set_type_ref = format_ident!("set_{}_ref", injected_type_name);
     let new_code = quote!{
+        #[allow(non_snake_case)]
         pub fn #update_type(&mut self,
                 sreg: &::dynamic_services::ServiceRegistration,
                 props: &std::collections::BTreeMap<String, String>) {
-            println!("********* updating {} with {:?}", #field, props);
             self.#set_type_ref(&sreg, &props);
 
             #(#update_calls)*
@@ -506,11 +506,10 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
             let set_ts_ref = format_ident!("set_{}_ref", injected_type_name);
             let itn = format_ident!("{}", injected_type_name);
             let injected_ref = format_ident!("{}", field);
-            // let invoke_svc = format_ident!("invoke_{}", field);
 
-            let update_md = generate_update_method(type_name, injected_type_name, field, lifetimes);
+            let update_md = generate_update_method(type_name, injected_type_name, field);
 
-            let mut new_code = quote! {
+            let new_code = quote! {
                 impl #tn #lifetimes_code {
                     #[allow(non_snake_case)]
                     pub fn #get_ts_ref(&self) -> &Option<ServiceReference<#itn>> {
@@ -526,7 +525,6 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
                     pub fn #set_ts_ref(&mut self,
                             sreg: &::dynamic_services::ServiceRegistration,
                             props: &std::collections::BTreeMap<String, String>) {
-                        println!("[{}] Setting {} to {:?}", #type_name, #field, sreg);
                         self.#injected_ref = Some(ServiceReference::from(sreg, props.clone()));
                     }
 
@@ -696,7 +694,6 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
     }
 
     let act_call = generate_activator_call(type_name);
-    let update_call = generate_update_call(type_name);
     let deact_call = generate_deactivator_call(type_name);
 
     let mut quotes = vec![];
@@ -728,7 +725,6 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
             let updater = format_ident!("update_{}", injected_type_name);
             update_calls.push(quote!{
                 if let Some(dcsvc) = svcx.downcast_ref::<#itn>() {
-                    println!("Found my service {:?}", dcsvc);
                     for (_, (i, _, _)) in gm.iter_mut() {
                         i.#updater(sreg, propsx);
                     }
@@ -783,23 +779,9 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
                 let svc = regd.get(&sreg);
                 if let Some((svcx, propsx)) = svc {
                     let mut gm = #global_inst_map.write().unwrap();
-                    println!("XUpdating service: {:?} - {:?}", svcx, propsx);
 
                     #(#update_calls)*
-                    // println!("Found type: {:?}", t);
-                    // println!("  and props: {:?}", p);
                 }
-                // setter injects has the mapping from type name to field name
-                // println!("Injected type name: {}", setter_injects); /* */
-
-                /*
-                let global = #global_inst_map.read().unwrap();
-                global.iter()
-                    .filter(|(_, (_, regs, _))| regs.contains(sreg))
-                    .for_each(|(_, (c, _, _))| {
-                        #update_call;
-                });
-                 */
             }
 
             #[allow(non_snake_case)]
@@ -890,40 +872,6 @@ fn generate_activator(file: &str, new_code: &mut proc_macro2::TokenStream) {
                 panic!("Unknown action: {}", op);
             }
         }
-    }
-}
-
-fn generate_update_call(type_name: &str) -> proc_macro2::TokenStream {
-    let mut new_code = quote! {};
-
-    let file = format!("{}/target/_{}.updtmp", std::env::var("CARGO_MANIFEST_DIR").unwrap(), type_name);
-    if Path::new(&file).exists() {
-        generate_update(&file, &mut new_code);
-    }
-
-    new_code
-}
-
-fn generate_update(file: &str, new_code: &mut proc_macro2::TokenStream) {
-    let updtmp_content = fs::read_to_string(file).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&updtmp_content).unwrap();
-
-    for action in json.as_array().unwrap() {
-        let op = action["op"].as_str().unwrap();
-        match op {
-            "UpdateFunct" => {
-                let func_name = action["method"].as_str().unwrap();
-                let update_md = format_ident!("{}", func_name);
-                new_code.extend(quote! {
-                    c.#update_md(props.clone());
-                    // c.#update_md();
-                });
-            }
-            _ => {
-                panic!("Unknown action: {}", op);
-            }
-        }
-
     }
 }
 
