@@ -168,54 +168,17 @@ fn find_attribute(f: &syn::Field, _name: &str) -> bool {
 //////////////////////////////////////////////////////////////////////////////////
 fn get_type_name(ident: &syn::Ident, ref_type: &syn::TypePath) -> Option<Action> {
     for s in ref_type.path.segments.iter() {
-        if s.ident.to_string() != "Option" {
+        if s.ident.to_string() != "ServiceReference" {
             return None;
         }
 
         return match &s.arguments {
             | PathArguments::AngleBracketed(aba)
-            => get_option_args(ident, aba),
+            => get_serviceref_typearg(ident, aba),
             | _ => None
         };
     }
     None
-}
-
-fn get_option_args(ident: &syn::Ident, aba: &syn::AngleBracketedGenericArguments) -> Option<Action> {
-    for a in aba.args.iter() {
-        if let GenericArgument::Type(t) = a {
-            return get_servicereference_type(ident, t);
-        }
-    }
-    None
-}
-
-fn get_servicereference_type(ident: &syn::Ident, t: &syn::Type) -> Option<Action> {
-    if let Type::Path(p) = t {
-        return get_from_typepath(ident, p);
-    }
-    None
-}
-
-fn get_from_typepath(ident: &syn::Ident, tp: &syn::TypePath) -> Option<Action> {
-    return get_from_pathsegment(ident, &(tp.path).segments);
-}
-
-fn get_from_pathsegment(ident: &syn::Ident, segs: &syn::punctuated::Punctuated<syn::PathSegment, token::PathSep>) -> Option<Action> {
-    if let Some(ps) = segs.first() {
-        if ps.ident.to_string() == "ServiceReference" {
-            return get_from_serviceref(ident, &ps.arguments);
-        }
-    }
-    None
-}
-
-fn get_from_serviceref(ident: &syn::Ident, arguments: &PathArguments) -> Option<Action> {
-    return match &arguments {
-        | PathArguments::AngleBracketed(aba)
-        => get_serviceref_typearg(ident, aba),
-        | _ => None
-    };
 }
 
 fn get_serviceref_typearg(ident: &syn::Ident, aba: &syn::AngleBracketedGenericArguments) -> Option<Action> {
@@ -427,7 +390,7 @@ fn generate_unset_all(type_name: &str, lifetimes: Vec<String>, fields: Vec<Strin
     for field in fields {
         let injected_ref = format_ident!("{}", field);
         unset_calls.push(quote! {
-            self.#injected_ref = None;
+            self.#injected_ref = ServiceReference::default();
         });
     }
     generated.extend(quote!{
@@ -460,7 +423,6 @@ fn get_lifetimes_from_json(actions: &[serde_json::Value]) -> Vec<String> {
 
 fn generate_update_method(type_name: &str, injected_type_name: &str,
     field: &str) -> proc_macro2::TokenStream {
-
     // Read the target/_<type_name>.updtmp file to get the update method name
     let mut upd_func_names = vec![];
     let upd_file = format!("{}/target/_{}.updtmp", std::env::var("CARGO_MANIFEST_DIR").unwrap(), type_name);
@@ -538,7 +500,7 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
                 impl #tn #lifetimes_code {
                     // Generate the getter for the injected field
                     #[allow(non_snake_case)]
-                    pub fn #get_ts_ref(&self) -> &Option<ServiceReference<#itn>> {
+                    pub fn #get_ts_ref(&self) -> &ServiceReference<#itn> {
                         &self.#injected_ref
                     }
 
@@ -553,7 +515,7 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
                     pub fn #set_ts_ref(&mut self,
                             sreg: &::dynamic_services::ServiceRegistration,
                             props: &std::collections::BTreeMap<String, String>) {
-                        self.#injected_ref = Some(ServiceReference::from(sreg, props.clone()));
+                        self.#injected_ref = ServiceReference::from(sreg, props.clone());
                     }
 
                     #update_md
@@ -746,7 +708,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
             inject_calls.push(quote!{
                 if let Some(sr) = svc.downcast_ref::<#itn>() {
                     for (_, (i, _, md)) in gm.iter_mut() {
-                        if i.#getter_ref().is_none() {
+                        if i.#getter_ref().get_properties().is_none() {
                             i.#setter_ref(sreg, props);
                             md.inc_fields_injected();
                         }
