@@ -7,7 +7,6 @@ use quote::{format_ident, quote};
 use syn::parse::Parser;
 use syn::{self, parse_str, token, Data, DataEnum, DataStruct, DataUnion, DeriveInput, Error, Fields, GenericArgument, PathArguments, Result, Type};
 use proc_macro2::Span;
-use serde_json;
 
 #[derive(Debug)]
 enum Action {
@@ -20,7 +19,7 @@ enum Action {
 }
 
 impl Action {
-    fn to_string(&self) -> String {
+    fn to_json_string(&self) -> String {
         match self {
             Action::LifeTimes {names} => {
                 format!("{{\"op\":\"LifeTimes\", \"names\":{:?} }}", names)
@@ -72,7 +71,7 @@ fn find_injection_points(ast: syn::DeriveInput) -> TokenStream {
             lines.push(",".to_string());
         }
 
-        lines.push(a.to_string());
+        lines.push(a.to_json_string());
     }
     lines.push("]".to_string());
     write_actions_file(tn, lines);
@@ -82,7 +81,7 @@ fn find_injection_points(ast: syn::DeriveInput) -> TokenStream {
 
 // Write a file target/_<type_name>.tmp with the injection actions
 fn write_actions_file(tn: String, lines: Vec<String>) {
-    if lines.len() == 0 {
+    if lines.is_empty() {
         return;
     }
 
@@ -167,30 +166,28 @@ fn find_attribute(f: &syn::Field, _name: &str) -> bool {
 // Methods below here are used to find the fields that need to be injected in the syntax tree
 //////////////////////////////////////////////////////////////////////////////////
 fn get_type_name(ident: &syn::Ident, ref_type: &syn::TypePath) -> Option<Action> {
-    for s in ref_type.path.segments.iter() {
-        if s.ident.to_string() != "ServiceReference" {
+    if let Some(s) = ref_type.path.segments.first() {
+        if s.ident != "ServiceReference" {
             return None;
         }
 
         return match &s.arguments {
             | PathArguments::AngleBracketed(aba)
-            => get_serviceref_typearg(ident, aba),
+                => get_serviceref_typearg(ident, aba),
             | _ => None
         };
     }
+
     None
 }
 
 fn get_serviceref_typearg(ident: &syn::Ident, aba: &syn::AngleBracketedGenericArguments) -> Option<Action> {
-    if let Some(arg) = aba.args.first() {
-        if let GenericArgument::Type(t) = arg {
-            if let Type::Path(tp) = t {
-                if let Some(tn) = tp.path.segments.first() {
-                    return Some(Action::SetterInjectField { field: ident.to_string(), type_name: tn.ident.to_string() });
-                }
-            }
+    if let Some(GenericArgument::Type(Type::Path(tp))) = aba.args.first() {
+        if let Some(tn) = tp.path.segments.first() {
+            return Some(Action::SetterInjectField { field: ident.to_string(), type_name: tn.ident.to_string() });
         }
     }
+
     None
 }
 //////////////////////////////////////////////////////////////////////////////////
@@ -219,7 +216,7 @@ pub fn update(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // It can only be used on structs that have the #[derive(DynamicServices)] macro.
 #[proc_macro_attribute]
 pub fn dynamic_services(attrs: TokenStream, item: TokenStream) -> TokenStream {
-    let toks: Result<syn::ItemImpl> = syn::parse(item.clone().into());
+    let toks: Result<syn::ItemImpl> = syn::parse(item.clone());
     let tokens = toks.unwrap();
 
     // Read the type name from the implementation
@@ -261,7 +258,7 @@ fn get_struct_path(attrs: TokenStream) -> Option<Action> {
     for arg in args_parsed.iter() {
         if let syn::Expr::Path(key) = arg.left.as_ref() {
             if let Some(ps) = key.path.segments.first() {
-                if ps.ident.to_string() == "path" {
+                if ps.ident == "path" {
                     if let syn::Expr::Path(p) = arg.right.as_ref() {
                         return get_full_path(p);
                     }
@@ -287,7 +284,7 @@ fn get_full_path(path: &syn::ExprPath) -> Option<Action> {
 // Write file in target/_<curtype>.<suffix> with the action serialized as JSON
 fn write_action(action: Action, curtype: &str, suffix: &str) {
     let filenm = format!("{}/target/_{}.{}", std::env::var("CARGO_MANIFEST_DIR").unwrap(), curtype, suffix);
-    let content = format!("[{}]", action.to_string());
+    let content = format!("[{}]", action.to_json_string());
     std::fs::write(filenm, content).unwrap();
 }
 
@@ -296,7 +293,7 @@ fn find_lifecycle_callback(ls: &str, itimpl: &syn::ItemImpl) -> Option<(String, 
         if let syn::ImplItem::Fn(f) = item {
             for a in f.attrs.iter() {
                 if let Some(an) = a.meta.path().get_ident() {
-                    if an.to_string() == ls {
+                    if *an == ls {
                         let inputs = get_inputs_from_fn(&f.sig.inputs);
                         return Some((f.sig.ident.to_string(), inputs));
                     }
@@ -321,7 +318,7 @@ fn find_deactivator(itimpl: &syn::ItemImpl) -> Option<Action> {
     if let Some((name, _)) = deact {
         return Some(Action::DeactivatorFunct { func_name: name });
     }
-    return None;
+    None
 }
 
 fn find_update(itimpl: &syn::ItemImpl) -> Option<Action> {
@@ -329,15 +326,14 @@ fn find_update(itimpl: &syn::ItemImpl) -> Option<Action> {
     if let Some((name, _)) = upd {
         return Some(Action::UpdateFunct { func_name: name });
     }
-    return None;
+    None
 }
 
 // Get the parameter signatures from a callback function signature
 fn get_inputs_from_fn(inputs: &syn::punctuated::Punctuated<syn::FnArg, token::Comma>) -> Vec<String> {
-    let mut counter = 0;
     let mut args = vec![];
 
-    for input in inputs {
+    for (counter, input) in inputs.iter().enumerate() {
         match input {
             | syn::FnArg::Receiver(_r)
             => {
@@ -353,13 +349,12 @@ fn get_inputs_from_fn(inputs: &syn::punctuated::Punctuated<syn::FnArg, token::Co
                 if let syn::Type::Reference(tr) = arg.ty.as_ref() {
                     if let syn::Type::Path(tp) = tr.elem.as_ref() {
                         if let Some(tn) = tp.path.segments.first() {
-                            args.push(format!("&{}", tn.ident.to_string()));
+                            args.push(format!("&{}", tn.ident));
                         }
                     }
                 }
             }
         }
-        counter += 1;
     }
 
     args
@@ -377,7 +372,7 @@ fn generate_impl(file_path: &str, type_name: &str, generated: &mut proc_macro2::
         generated.extend(generate_action(type_name, action, &mut fields, &lifetimes));
     }
 
-    if fields.len() > 0 {
+    if !fields.is_empty() {
         generate_unset_all(type_name, lifetimes, fields, generated);
     }
 }
@@ -476,7 +471,7 @@ fn generate_update_method(type_name: &str, injected_type_name: &str,
 
 // Generate the consumer impl code for actions found in the target/_<type_name>.tmp file
 fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec<String>,
-        lifetimes: &Vec<String>) -> proc_macro2::TokenStream {
+        lifetimes: &[String]) -> proc_macro2::TokenStream {
     let lifetimes_code = quote_fixed_lifetimes(lifetimes.len(), quote! { '_ });
 
     let op = action["op"].as_str().unwrap();
@@ -522,11 +517,11 @@ fn generate_action(type_name: &str, action: &serde_json::Value, fields: &mut Vec
                 }
             };
 
-            return new_code;
+            new_code
         },
         "LifeTimes" => {
             // read earlier
-            return quote!{}; // returns no code
+            quote!{} // returns no code
         },
         _ => {
             panic!("Unknown action: {}", op);
@@ -580,12 +575,11 @@ pub fn dynamic_services_main(_attr: TokenStream, item: TokenStream) -> TokenStre
     let mut consumer_types = HashMap::new();
     let dir = format!("{}/target", std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let paths = fs::read_dir(dir).unwrap();
-    for path in paths {
-        if let Ok(p) = path {
-            if let Some((name, path, tokens)) = generate_consumer(p.path(), p.file_name().to_str().unwrap()) {
-                consumer_types.insert(name, path);
-                generated.extend(tokens);
-            }
+    for path in paths.flatten() {
+        if let Some((name, path, tokens)) =
+                generate_consumer(path.path(), path.file_name().to_str().unwrap()) {
+            consumer_types.insert(name, path);
+            generated.extend(tokens);
         }
     }
 
@@ -700,7 +694,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
 
         let expected_num_injects = setter_injects.len();
         let mut inject_calls = vec![];
-        for (_, injected_type_name) in &setter_injects {
+        for injected_type_name in setter_injects.values() {
             let itn = format_ident!("{}", injected_type_name);
             let getter_ref = format_ident!("get_{}_ref", injected_type_name);
             let setter_ref = format_ident!("set_{}_ref", injected_type_name);
@@ -718,7 +712,7 @@ fn generate_inject_function(json: serde_json::Value, type_name: &str) -> Vec<pro
         }
 
         let mut update_calls = vec![];
-        for (_, injected_type_name) in &setter_injects {
+        for injected_type_name in setter_injects.values() {
             let itn = format_ident!("{}", injected_type_name);
             let updater = format_ident!("update_{}", injected_type_name);
             update_calls.push(quote!{
@@ -831,10 +825,10 @@ fn generate_activator(file: &str, new_code: &mut proc_macro2::TokenStream) {
                 let mut arg_coll_code = vec![quote!{let svc_registry = ::dynamic_services::REGD_SERVICES.read().unwrap();}];
                 let mut arg_prep = vec![];
                 let mut invoke_cond = vec![quote!{ true }];
-                let mut argnum = 0usize;
-                for arg in args {
+
+                for (argnum, arg) in args.iter().enumerate() {
                     let a = arg.as_str().unwrap();
-                    if a.chars().next().unwrap() != '&' {
+                    if !a.starts_with('&') {
                         panic!("Expected reference argument");
                     }
 
@@ -856,7 +850,6 @@ fn generate_activator(file: &str, new_code: &mut proc_macro2::TokenStream) {
                     arg_prep.push(quote!{ let #argval_name = #arg_name.unwrap(); });
                     arg_calls.push(quote!{ #argval_name });
                     arg_coll_code.push(code);
-                    argnum += 1;
                 }
 
                 let activate_md = format_ident!("{}", func_name);
@@ -911,7 +904,7 @@ fn generate_deactivator(file: &str, new_code: &mut proc_macro2::TokenStream) {
 // Generates a register_consumers function that registers each consumer
 fn generate_register_consumers(consumer_types: &HashMap<String, String>) -> proc_macro2::TokenStream {
     let mut register_calls = vec![];
-    for (ct, _) in consumer_types {
+    for ct in consumer_types.keys() {
         let register_fn = format_ident!("register_{}", ct);
         register_calls.push(quote!{
             #register_fn();
@@ -935,7 +928,7 @@ fn generate_register_consumers(consumer_types: &HashMap<String, String>) -> proc
 
 fn generate_inject_consumers(consumer_types: &HashMap<String, String>) -> proc_macro2::TokenStream {
     let mut inject_calls = vec![];
-    for (ct, _) in consumer_types {
+    for ct in consumer_types.keys() {
         let inject_fn = format_ident!("inject_{}", ct);
         inject_calls.push(quote!{
             #inject_fn(svc, &sreg, &props);
@@ -959,7 +952,7 @@ fn generate_uninject_consumers(consumer_types: &HashMap<String, String>) -> proc
     // being unregistered.
 
     let mut uninject_calls = vec![];
-    for (ct, _) in consumer_types {
+    for ct in consumer_types.keys() {
         let uninject_fn = format_ident!("uninject_{}", ct);
         uninject_calls.push(quote!{
             #uninject_fn(sr);
@@ -975,7 +968,7 @@ fn generate_uninject_consumers(consumer_types: &HashMap<String, String>) -> proc
 
 fn generate_update_consumers(consumer_types: &HashMap<String, String>) -> proc_macro2::TokenStream {
     let mut update_calls = vec![];
-    for (ct, _) in consumer_types {
+    for ct in consumer_types.keys() {
         let update_fn = format_ident!("update_{}", ct);
         update_calls.push(quote!{
             #update_fn(sreg, &props);
